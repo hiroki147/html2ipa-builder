@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       app_name:
-        description: "アプリ名"
+        description: "App name"
         required: true
         default: "MyHTMLApp"
 
       html_file:
-        description: "使用するHTMLファイル（例: second.html / games/index.html）"
+        description: "HTML file"
         required: true
         default: "second.html"
 
@@ -23,265 +23,165 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      # ============================================================
-      # 1. ソース取得
-      # ============================================================
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ============================================================
-      # 2. Node.js
-      # ============================================================
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 18
 
-      # ============================================================
-      # 3. 入力値
-      # ============================================================
       - name: Set variables
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          APP_NAME="${{ github.event.inputs.app_name }}"
-          HTML_FILE="${{ github.event.inputs.html_file }}"
-          PACKAGE_ID="${{ github.event.inputs.package_id }}"
+          echo "APP_NAME=${{ github.event.inputs.app_name }}" >> "$GITHUB_ENV"
+          echo "HTML_FILE=${{ github.event.inputs.html_file }}" >> "$GITHUB_ENV"
+          echo "PACKAGE_ID=${{ github.event.inputs.package_id }}" >> "$GITHUB_ENV"
 
-          echo "APP_NAME=$APP_NAME" >> "$GITHUB_ENV"
-          echo "HTML_FILE=$HTML_FILE" >> "$GITHUB_ENV"
-          echo "PACKAGE_ID=$PACKAGE_ID" >> "$GITHUB_ENV"
-
-          echo "======================================"
-          echo "App Name   : $APP_NAME"
-          echo "HTML File  : $HTML_FILE"
-          echo "Bundle ID  : $PACKAGE_ID"
-          echo "======================================"
-
-      # ============================================================
-      # 4. HTMLファイルの存在確認
-      # ============================================================
-      - name: Check HTML file
+      - name: Check HTML
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
+
+          echo "HTML: $HTML_FILE"
 
           if [ ! -f "$HTML_FILE" ]; then
-            echo "ERROR: HTML file not found:"
-            echo "$HTML_FILE"
+            echo "ERROR: HTML file not found!"
             echo
-            echo "Available HTML files:"
-            find . -type f \
-              -iname "*.html" \
-              -not -path "./node_modules/*" \
+            find . -type f -name "*.html" \
               -not -path "./.git/*" \
-              | sort
+              -not -path "./node_modules/*"
             exit 1
           fi
 
-          echo "Found:"
-          realpath "$HTML_FILE"
-
-      # ============================================================
-      # 5. npm / Capacitor
-      # ============================================================
       - name: Install Capacitor
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
           if [ ! -f package.json ]; then
             npm init -y
           fi
 
-          npm install \
-            @capacitor/core \
-            @capacitor/cli \
-            @capacitor/ios
+          npm install @capacitor/core @capacitor/cli @capacitor/ios
 
-      # ============================================================
-      # 6. www を作成
-      #
-      # HTMLが
-      #
-      # second.html
-      #
-      # なら
-      #
-      # www/index.html
-      #
-      # にする。
-      #
-      # games/index.html
-      #
-      # のような場合は、そのディレクトリの
-      # CSS / JS / images もまとめてコピーする。
-      # ============================================================
       - name: Prepare web files
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
           rm -rf www
           mkdir -p www
 
           HTML_DIR="$(dirname "$HTML_FILE")"
 
-          echo "HTML_DIR=$HTML_DIR"
+          echo "HTML directory: $HTML_DIR"
 
           if [ "$HTML_DIR" = "." ]; then
-            echo "Root directory HTML detected."
 
-            # ルートにあるWeb関連ファイルをコピー。
-            # Node / Git / Capacitor関連は除外する。
+            echo "HTML is in repository root."
+
             rsync -a \
-              --exclude ".git/" \
-              --exclude ".github/" \
-              --exclude "node_modules/" \
-              --exclude "ios/" \
-              --exclude "www/" \
-              --exclude "package.json" \
-              --exclude "package-lock.json" \
-              --exclude "yarn.lock" \
-              --exclude "pnpm-lock.yaml" \
-              --exclude "capacitor.config.*" \
-              --exclude "*.yml" \
-              --exclude "*.yaml" \
-              --exclude "index.js" \
-              --exclude "server.js" \
-              --exclude "server.mjs" \
-              --exclude "server.cjs" \
-              ./ www/
+              --exclude=".git/" \
+              --exclude=".github/" \
+              --exclude="node_modules/" \
+              --exclude="ios/" \
+              --exclude="www/" \
+              --exclude="package.json" \
+              --exclude="package-lock.json" \
+              --exclude="yarn.lock" \
+              --exclude="pnpm-lock.yaml" \
+              --exclude="capacitor.config.json" \
+              --exclude="capacitor.config.ts" \
+              --exclude="index.js" \
+              --exclude="server.js" \
+              . www/
 
           else
-            echo "Subdirectory HTML detected."
 
-            # HTMLと同じディレクトリ以下を丸ごとコピー。
+            echo "HTML is inside a subdirectory."
+
             rsync -a \
-              --exclude "node_modules/" \
-              --exclude ".git/" \
-              "$HTML_DIR"/ www/
+              --exclude="node_modules/" \
+              --exclude=".git/" \
+              "$HTML_DIR/" www/
+
           fi
 
-          # 指定されたHTMLを必ずindex.htmlにする。
           cp "$HTML_FILE" www/index.html
 
           echo
-          echo "======================================"
-          echo "www contents"
-          echo "======================================"
+          echo "===== WWW ====="
 
           find www -maxdepth 3 -type f | sort
 
           echo
-          echo "======================================"
-          echo "index.html"
-          echo "======================================"
+          echo "===== INDEX ====="
 
           head -30 www/index.html
 
-          # 絶対にnode_modulesを入れない
-          if [ -d "www/node_modules" ]; then
-            echo "ERROR: node_modules was copied into www!"
+          if [ -d www/node_modules ]; then
+            echo "ERROR: node_modules detected in www!"
             exit 1
           fi
 
-      # ============================================================
-      # 7. Capacitor初期化
-      # ============================================================
       - name: Initialize Capacitor
         shell: bash
         run: |
-          set -euo pipefail
-
-          rm -f capacitor.config.ts capacitor.config.json
+          set -e
 
           npx cap init \
             "$APP_NAME" \
             "$PACKAGE_ID" \
             --web-dir=www
 
-      # ============================================================
-      # 8. iOSプロジェクト作成
-      # ============================================================
-      - name: Add iOS platform
+      - name: Add iOS
         shell: bash
         run: |
-          set -euo pipefail
-
-          rm -rf ios
+          set -e
 
           npx cap add ios
 
-      # ============================================================
-      # 9. Webファイル同期
-      # ============================================================
       - name: Sync Capacitor
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
           npx cap sync ios
 
-      # ============================================================
-      # 10. iOS Deployment Targetを14.0に設定
-      # ============================================================
-      - name: Set iOS deployment target
+      - name: Set deployment target
         shell: bash
         run: |
-          set -euo pipefail
-
-          echo "Setting iOS deployment target to 14.0"
-
-          if [ -f ios/App/Podfile ]; then
-            sed -i '' \
-              "s/platform :ios, '[^']*'/platform :ios, '14.0'/" \
-              ios/App/Podfile || true
-
-            if ! grep -q "platform :ios" ios/App/Podfile; then
-              sed -i '' '1i\
-platform :ios, '\''14.0'\''
-' ios/App/Podfile
-            fi
-          fi
-
-          find ios/App \
-            -name "*.pbxproj" \
-            -type f \
-            -exec sed -i '' \
-              "s/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]*;/IPHONEOS_DEPLOYMENT_TARGET = 14.0;/g" \
-              {} \;
-
-          find ios/App \
-            -name "*.xcconfig" \
-            -type f \
-            -exec sed -i '' \
-              "s/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]*;/IPHONEOS_DEPLOYMENT_TARGET = 14.0;/g" \
-              {} \;
-
-      # ============================================================
-      # 11. CocoaPods
-      # ============================================================
-      - name: Install CocoaPods dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
+          set -e
 
           cd ios/App
 
-          pod install --repo-update
+          if grep -q "platform :ios" Podfile; then
+            sed -i '' "s/platform :ios, '[^']*'/platform :ios, '14.0'/" Podfile
+          else
+            sed -i '' "1s/^/platform :ios, '14.0'\n/" Podfile
+          fi
 
-      # ============================================================
-      # 12. Xcodeビルド
-      #
-      # 署名はしない。
-      # SideStore / AltStore側で署名する。
-      # ============================================================
-      - name: Build unsigned iOS app
+          find . -name "*.pbxproj" -type f -exec \
+            sed -i '' \
+            "s/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]*/IPHONEOS_DEPLOYMENT_TARGET = 14.0/g" \
+            {} \;
+
+      - name: Install CocoaPods
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
+
+          cd ios/App
+
+          pod install
+
+      - name: Build iOS app
+        shell: bash
+        run: |
+          set -e
 
           cd ios/App
 
@@ -299,148 +199,97 @@ platform :ios, '\''14.0'\''
             CODE_SIGNING_ALLOWED=NO \
             archive
 
-      # ============================================================
-      # 13. .appを確認
-      # ============================================================
       - name: Verify app
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
           APP_PATH="ios/App/build/App.xcarchive/Products/Applications/App.app"
 
-          if [ ! -d "$APP_PATH" ]; then
-            echo "ERROR: App.app not found"
-            find ios/App/build -maxdepth 6 -print
-            exit 1
-          fi
-
-          echo "======================================"
-          echo "App found"
-          echo "======================================"
+          echo "Checking:"
           echo "$APP_PATH"
 
-          echo
-          echo "Contents:"
-          find "$APP_PATH" -maxdepth 2 -type f | sort
-
-          # Info.plist
-          if [ ! -f "$APP_PATH/Info.plist" ]; then
-            echo "ERROR: Info.plist missing!"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "ERROR: App.app not found!"
             exit 1
           fi
 
-          # 実行ファイル
+          if [ ! -f "$APP_PATH/Info.plist" ]; then
+            echo "ERROR: Info.plist not found!"
+            exit 1
+          fi
+
           EXECUTABLE=$(
             /usr/libexec/PlistBuddy \
-              -c "Print :CFBundleExecutable" \
-              "$APP_PATH/Info.plist"
+            -c "Print :CFBundleExecutable" \
+            "$APP_PATH/Info.plist"
           )
 
-          echo
           echo "Executable: $EXECUTABLE"
 
           if [ ! -f "$APP_PATH/$EXECUTABLE" ]; then
-            echo "ERROR: Executable missing!"
+            echo "ERROR: Executable not found!"
             exit 1
           fi
 
-          # Bundle ID
           BUNDLE_ID=$(
             /usr/libexec/PlistBuddy \
-              -c "Print :CFBundleIdentifier" \
-              "$APP_PATH/Info.plist"
+            -c "Print :CFBundleIdentifier" \
+            "$APP_PATH/Info.plist"
           )
 
           echo "Bundle ID: $BUNDLE_ID"
 
           if [ "$BUNDLE_ID" != "$PACKAGE_ID" ]; then
             echo "ERROR: Bundle ID mismatch!"
-            echo "Expected: $PACKAGE_ID"
-            echo "Actual:   $BUNDLE_ID"
             exit 1
           fi
 
-          # Architecture
           echo
-          echo "Architectures:"
+          echo "Architecture:"
           lipo -info "$APP_PATH/$EXECUTABLE"
 
-          # HTML
-          if [ ! -f "$APP_PATH/public/index.html" ]; then
-            echo "ERROR: Capacitor public/index.html missing!"
-            find "$APP_PATH" -maxdepth 3 -type f | sort
-            exit 1
-          fi
-
           echo
-          echo "======================================"
-          echo "App verification OK"
-          echo "======================================"
+          echo "App verification OK!"
 
-      # ============================================================
-      # 14. IPA作成
-      # ============================================================
       - name: Create IPA
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
           APP_PATH="ios/App/build/App.xcarchive/Products/Applications/App.app"
 
           rm -rf Payload
-          mkdir -p Payload
+
+          mkdir Payload
 
           cp -R "$APP_PATH" Payload/App.app
 
-          # IPAはPayload/App.appの構造でなければならない。
-          if [ ! -d "Payload/App.app" ]; then
-            echo "ERROR: Payload/App.app missing!"
-            exit 1
-          fi
+          rm -f "$APP_NAME.ipa"
 
-          rm -f "${APP_NAME}.ipa"
-
-          zip -qry "${APP_NAME}.ipa" Payload
+          zip -qry "$APP_NAME.ipa" Payload
 
           echo
-          echo "======================================"
-          echo "IPA created"
-          echo "======================================"
+          echo "IPA created:"
+          ls -lh "$APP_NAME.ipa"
 
-          ls -lh "${APP_NAME}.ipa"
-
-      # ============================================================
-      # 15. IPA内部構造を最終確認
-      # ============================================================
       - name: Verify IPA
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          IPA="${APP_NAME}.ipa"
+          echo "===== IPA CONTENTS ====="
 
-          echo "IPA contents:"
-          unzip -l "$IPA"
+          unzip -l "$APP_NAME.ipa"
 
           echo
           echo "Checking Payload/App.app..."
 
-          unzip -l "$IPA" | grep -q "Payload/App.app/Info.plist"
-
-          if [ $? -ne 0 ]; then
-            echo "ERROR: Info.plist is missing from IPA!"
-            exit 1
-          fi
+          unzip -l "$APP_NAME.ipa" | grep "Payload/App.app/Info.plist"
 
           echo
-          echo "======================================"
-          echo "IPA verification OK"
-          echo "======================================"
+          echo "IPA verification OK!"
 
-      # ============================================================
-      # 16. GitHub Actions Artifact
-      # ============================================================
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
@@ -448,22 +297,7 @@ platform :ios, '\''14.0'\''
           path: ${{ github.event.inputs.app_name }}.ipa
           if-no-files-found: error
 
-      # ============================================================
-      # 17. デバッグ用情報
-      # ============================================================
-      - name: Build summary
+      - name: SHA256
         shell: bash
         run: |
-          echo "======================================"
-          echo "BUILD SUCCESS"
-          echo "======================================"
-          echo
-          echo "App Name : $APP_NAME"
-          echo "Bundle ID: $PACKAGE_ID"
-          echo "HTML     : $HTML_FILE"
-          echo
-          echo "IPA:"
-          ls -lh "${APP_NAME}.ipa"
-          echo
-          echo "IPA SHA256:"
-          shasum -a 256 "${APP_NAME}.ipa"
+          shasum -a 256 "$APP_NAME.ipa"
