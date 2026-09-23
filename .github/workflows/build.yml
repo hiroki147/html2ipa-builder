@@ -1,4 +1,3 @@
-```yaml
 name: Build HTML to iOS IPA
 
 on:
@@ -468,4 +467,3 @@ platform :ios, '\''14.0'\''
           echo
           echo "IPA SHA256:"
           shasum -a 256 "${APP_NAME}.ipa"
-```
