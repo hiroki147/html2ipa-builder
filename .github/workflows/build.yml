@@ -23,14 +23,24 @@ jobs:
     runs-on: macos-latest
 
     steps:
+
+      # ============================================================
+      # Checkout
+      # ============================================================
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ============================================================
+      # Node.js
+      # ============================================================
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 18
 
+      # ============================================================
+      # Variables
+      # ============================================================
       - name: Set variables
         shell: bash
         run: |
@@ -40,22 +50,41 @@ jobs:
           echo "HTML_FILE=${{ github.event.inputs.html_file }}" >> "$GITHUB_ENV"
           echo "PACKAGE_ID=${{ github.event.inputs.package_id }}" >> "$GITHUB_ENV"
 
+          echo "================================"
+          echo "App       : ${{ github.event.inputs.app_name }}"
+          echo "HTML      : ${{ github.event.inputs.html_file }}"
+          echo "Bundle ID : ${{ github.event.inputs.package_id }}"
+          echo "================================"
+
+      # ============================================================
+      # Check HTML
+      # ============================================================
       - name: Check HTML
         shell: bash
         run: |
           set -e
 
-          echo "HTML: $HTML_FILE"
-
           if [ ! -f "$HTML_FILE" ]; then
-            echo "ERROR: HTML file not found!"
+            echo "ERROR: HTML file not found:"
+            echo "$HTML_FILE"
             echo
-            find . -type f -name "*.html" \
+            echo "Available HTML files:"
+            find . \
+              -type f \
+              -name "*.html" \
               -not -path "./.git/*" \
-              -not -path "./node_modules/*"
+              -not -path "./node_modules/*" \
+              | sort
+
             exit 1
           fi
 
+          echo "Found HTML:"
+          realpath "$HTML_FILE"
+
+      # ============================================================
+      # Install Capacitor 7
+      # ============================================================
       - name: Install Capacitor
         shell: bash
         run: |
@@ -65,8 +94,18 @@ jobs:
             npm init -y
           fi
 
-          npm install @capacitor/core @capacitor/cli @capacitor/ios
+          npm install \
+            @capacitor/core@7 \
+            @capacitor/cli@7 \
+            @capacitor/ios@7
 
+          echo
+          echo "Capacitor versions:"
+          npm list @capacitor/core @capacitor/cli @capacitor/ios
+
+      # ============================================================
+      # Prepare www
+      # ============================================================
       - name: Prepare web files
         shell: bash
         run: |
@@ -77,7 +116,8 @@ jobs:
 
           HTML_DIR="$(dirname "$HTML_FILE")"
 
-          echo "HTML directory: $HTML_DIR"
+          echo "HTML directory:"
+          echo "$HTML_DIR"
 
           if [ "$HTML_DIR" = "." ]; then
 
@@ -97,6 +137,8 @@ jobs:
               --exclude="capacitor.config.ts" \
               --exclude="index.js" \
               --exclude="server.js" \
+              --exclude="server.mjs" \
+              --exclude="server.cjs" \
               . www/
 
           else
@@ -110,65 +152,124 @@ jobs:
 
           fi
 
+          # 指定HTMLをアプリのindex.htmlにする
           cp "$HTML_FILE" www/index.html
 
           echo
-          echo "===== WWW ====="
+          echo "================================"
+          echo "WWW FILES"
+          echo "================================"
 
           find www -maxdepth 3 -type f | sort
 
-          echo
-          echo "===== INDEX ====="
-
-          head -30 www/index.html
-
-          if [ -d www/node_modules ]; then
-            echo "ERROR: node_modules detected in www!"
+          # node_modulesが入っていないことを確認
+          if [ -d "www/node_modules" ]; then
+            echo "ERROR: node_modules exists in www!"
             exit 1
           fi
 
+      # ============================================================
+      # Initialize Capacitor
+      # ============================================================
       - name: Initialize Capacitor
         shell: bash
         run: |
           set -e
+
+          rm -f capacitor.config.json
+          rm -f capacitor.config.ts
 
           npx cap init \
             "$APP_NAME" \
             "$PACKAGE_ID" \
             --web-dir=www
 
+      # ============================================================
+      # Add iOS
+      # ============================================================
       - name: Add iOS
         shell: bash
         run: |
           set -e
 
+          rm -rf ios
+
           npx cap add ios
 
-      - name: Sync Capacitor
+      # ============================================================
+      # IMPORTANT:
+      # Podfileをcap syncより前に修正する
+      # ============================================================
+      - name: Configure iOS deployment target
         shell: bash
         run: |
           set -e
 
-          npx cap sync ios
+          PODFILE="ios/App/Podfile"
 
-      - name: Set deployment target
+          echo "================================"
+          echo "Original Podfile"
+          echo "================================"
+
+          cat "$PODFILE"
+
+          echo
+          echo "================================"
+          echo "Setting iOS 14.0"
+          echo "================================"
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("ios/App/Podfile")
+          text = path.read_text()
+
+          lines = text.splitlines()
+
+          found = False
+
+          for i, line in enumerate(lines):
+              if line.strip().startswith("platform :ios"):
+                  lines[i] = "platform :ios, '14.0'"
+                  found = True
+                  break
+
+          if not found:
+              lines.insert(0, "platform :ios, '14.0'")
+
+          path.write_text("\n".join(lines) + "\n")
+          PY
+
+          echo
+          cat "$PODFILE"
+
+      # ============================================================
+      # Modify Xcode deployment target
+      # ============================================================
+      - name: Configure Xcode
         shell: bash
         run: |
           set -e
 
-          cd ios/App
-
-          if grep -q "platform :ios" Podfile; then
-            sed -i '' "s/platform :ios, '[^']*'/platform :ios, '14.0'/" Podfile
-          else
-            sed -i '' "1s/^/platform :ios, '14.0'\n/" Podfile
-          fi
-
-          find . -name "*.pbxproj" -type f -exec \
-            sed -i '' \
-            "s/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]*/IPHONEOS_DEPLOYMENT_TARGET = 14.0/g" \
+          find ios/App \
+            -name "*.pbxproj" \
+            -type f \
+            -print \
+            -exec sed -i '' \
+            's/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]*/IPHONEOS_DEPLOYMENT_TARGET = 14.0/g' \
             {} \;
 
+          echo
+          echo "Deployment targets:"
+          grep -R \
+            "IPHONEOS_DEPLOYMENT_TARGET" \
+            ios/App \
+            --include="*.pbxproj" \
+            || true
+
+      # ============================================================
+      # Install CocoaPods
+      # ============================================================
       - name: Install CocoaPods
         shell: bash
         run: |
@@ -176,8 +277,64 @@ jobs:
 
           cd ios/App
 
+          pod install --repo-update
+
+      # ============================================================
+      # Sync Capacitor
+      # ============================================================
+      - name: Sync Capacitor
+        shell: bash
+        run: |
+          set -e
+
+          npx cap sync ios
+
+      # ============================================================
+      # Re-apply deployment target after sync
+      # ============================================================
+      - name: Reapply deployment target
+        shell: bash
+        run: |
+          set -e
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("ios/App/Podfile")
+
+          if path.exists():
+              text = path.read_text()
+
+              lines = text.splitlines()
+
+              found = False
+
+              for i, line in enumerate(lines):
+                  if line.strip().startswith("platform :ios"):
+                      lines[i] = "platform :ios, '14.0'"
+                      found = True
+                      break
+
+              if not found:
+                  lines.insert(0, "platform :ios, '14.0'")
+
+              path.write_text("\n".join(lines) + "\n")
+          PY
+
+          find ios/App \
+            -name "*.pbxproj" \
+            -type f \
+            -exec sed -i '' \
+            's/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]*/IPHONEOS_DEPLOYMENT_TARGET = 14.0/g' \
+            {} \;
+
+          cd ios/App
+
           pod install
 
+      # ============================================================
+      # Build
+      # ============================================================
       - name: Build iOS app
         shell: bash
         run: |
@@ -199,6 +356,9 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             archive
 
+      # ============================================================
+      # Verify .app
+      # ============================================================
       - name: Verify app
         shell: bash
         run: |
@@ -206,7 +366,10 @@ jobs:
 
           APP_PATH="ios/App/build/App.xcarchive/Products/Applications/App.app"
 
-          echo "Checking:"
+          echo "================================"
+          echo "APP PATH"
+          echo "================================"
+
           echo "$APP_PATH"
 
           if [ ! -d "$APP_PATH" ]; then
@@ -214,44 +377,63 @@ jobs:
             exit 1
           fi
 
+          # Info.plist
           if [ ! -f "$APP_PATH/Info.plist" ]; then
-            echo "ERROR: Info.plist not found!"
+            echo "ERROR: Info.plist missing!"
             exit 1
           fi
 
+          # Executable
           EXECUTABLE=$(
             /usr/libexec/PlistBuddy \
-            -c "Print :CFBundleExecutable" \
-            "$APP_PATH/Info.plist"
+              -c "Print :CFBundleExecutable" \
+              "$APP_PATH/Info.plist"
           )
 
-          echo "Executable: $EXECUTABLE"
+          echo "Executable:"
+          echo "$EXECUTABLE"
 
           if [ ! -f "$APP_PATH/$EXECUTABLE" ]; then
-            echo "ERROR: Executable not found!"
+            echo "ERROR: Executable missing!"
             exit 1
           fi
 
+          # Bundle ID
           BUNDLE_ID=$(
             /usr/libexec/PlistBuddy \
-            -c "Print :CFBundleIdentifier" \
-            "$APP_PATH/Info.plist"
+              -c "Print :CFBundleIdentifier" \
+              "$APP_PATH/Info.plist"
           )
 
-          echo "Bundle ID: $BUNDLE_ID"
+          echo "Bundle ID:"
+          echo "$BUNDLE_ID"
 
           if [ "$BUNDLE_ID" != "$PACKAGE_ID" ]; then
             echo "ERROR: Bundle ID mismatch!"
+            echo "Expected: $PACKAGE_ID"
+            echo "Actual:   $BUNDLE_ID"
             exit 1
           fi
 
+          # Architecture
           echo
           echo "Architecture:"
           lipo -info "$APP_PATH/$EXECUTABLE"
 
-          echo
-          echo "App verification OK!"
+          # Web assets
+          if [ ! -f "$APP_PATH/public/index.html" ]; then
+            echo "ERROR: public/index.html missing!"
+            exit 1
+          fi
 
+          echo
+          echo "================================"
+          echo "APP VERIFICATION OK"
+          echo "================================"
+
+      # ============================================================
+      # Create IPA
+      # ============================================================
       - name: Create IPA
         shell: bash
         run: |
@@ -261,7 +443,7 @@ jobs:
 
           rm -rf Payload
 
-          mkdir Payload
+          mkdir -p Payload
 
           cp -R "$APP_PATH" Payload/App.app
 
@@ -270,34 +452,49 @@ jobs:
           zip -qry "$APP_NAME.ipa" Payload
 
           echo
-          echo "IPA created:"
+          echo "================================"
+          echo "IPA CREATED"
+          echo "================================"
+
           ls -lh "$APP_NAME.ipa"
 
+      # ============================================================
+      # Verify IPA
+      # ============================================================
       - name: Verify IPA
         shell: bash
         run: |
           set -e
 
-          echo "===== IPA CONTENTS ====="
+          echo "================================"
+          echo "IPA CONTENTS"
+          echo "================================"
 
           unzip -l "$APP_NAME.ipa"
 
           echo
-          echo "Checking Payload/App.app..."
+          echo "Checking Info.plist..."
 
-          unzip -l "$APP_NAME.ipa" | grep "Payload/App.app/Info.plist"
+          unzip -l "$APP_NAME.ipa" \
+            | grep -q "Payload/App.app/Info.plist"
 
           echo
           echo "IPA verification OK!"
 
+      # ============================================================
+      # SHA256
+      # ============================================================
+      - name: SHA256
+        shell: bash
+        run: |
+          shasum -a 256 "$APP_NAME.ipa"
+
+      # ============================================================
+      # Upload
+      # ============================================================
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: ${{ github.event.inputs.app_name }}-IPA
           path: ${{ github.event.inputs.app_name }}.ipa
           if-no-files-found: error
-
-      - name: SHA256
-        shell: bash
-        run: |
-          shasum -a 256 "$APP_NAME.ipa"
