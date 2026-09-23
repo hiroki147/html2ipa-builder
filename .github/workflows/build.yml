@@ -7,101 +7,526 @@ on:
         description: "App name"
         required: true
         default: MyHTMLApp
+
       html_file:
-        description: "HTML filename (second.html)"
+        description: "HTML filename/path (e.g. second.html or games/index.html)"
         required: true
         default: second.html
+
+      bundle_id:
+        description: "Bundle Identifier"
+        required: true
+        default: com.hiroki.myhtmlapp
 
 jobs:
   build-ios:
     runs-on: macos-latest
 
     steps:
+
+      # ============================================================
+      # 1. Checkout
+      # ============================================================
       - name: Checkout
         uses: actions/checkout@v4
 
+
+      # ============================================================
+      # 2. Setup Node
+      # ============================================================
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version: 20
 
-      - name: Prepare Capacitor project
+
+      # ============================================================
+      # 3. Check HTML
+      # ============================================================
+      - name: Check HTML file
+        shell: bash
         run: |
-          npm init -y
-          npm install @capacitor/cli @capacitor/core @capacitor/ios
-          mkdir -p www
-          echo '<html><body><h1>Hello iOS</h1></body></html>' > www/second.html
-          APP_NAME="${{ github.event.inputs.app_name }}"
-          PACKAGE_ID="com.${{ github.actor }}.${{ github.event.inputs.app_name }}"
-          npx cap init "$APP_NAME" "$PACKAGE_ID" --web-dir=www
+          HTML_FILE="${{ github.event.inputs.html_file }}"
 
-      - name: Install CocoaPods
-        run: sudo gem install cocoapods
+          echo "Requested HTML:"
+          echo "$HTML_FILE"
 
-      - name: Add iOS platform
-        run: |
-          npx cap add ios || true
-          echo "✅ iOS platform created:"
-          ls -R ios || true
-
-      - name: Force deployment target to iOS 14.0 everywhere
-        run: |
-          # 1️⃣ Подготовим Podfile
-          cd ios/App
-          if [ -f Podfile ]; then
-            sed -i '' 's/platform :ios.*/platform :ios, "14.0"/' Podfile || true
-          else
-            echo 'platform :ios, "14.0"' > Podfile
-            echo 'target "App" do' >> Podfile
-            echo '  use_frameworks!' >> Podfile
-            echo '  use_modular_headers!' >> Podfile
-            echo 'end' >> Podfile
+          if [ ! -f "$HTML_FILE" ]; then
+            echo "❌ HTML file not found:"
+            echo "$HTML_FILE"
+            echo
+            echo "Repository files:"
+            find . -maxdepth 4 -type f | sort | head -300
+            exit 1
           fi
 
-          # 2️⃣ Исправим все Xcode targets
-          cd ..
-          find . -type f -name "project.pbxproj" -print0 | while IFS= read -r -d '' file; do
-            sed -i '' 's/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]*/IPHONEOS_DEPLOYMENT_TARGET = 14.0/' "$file" || true
-          done
-          find . -type f -name "*.xcconfig" -print0 | while IFS= read -r -d '' file; do
-            sed -i '' 's/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]*/IPHONEOS_DEPLOYMENT_TARGET = 14.0/' "$file" || true
-          done
-          echo "✅ All deployment targets forced to iOS 14.0"
+          echo "✅ HTML file found:"
+          ls -lh "$HTML_FILE"
 
-      - name: Install Pods
+
+      # ============================================================
+      # 4. Prepare Capacitor project
+      # ============================================================
+      - name: Prepare Capacitor project
+        shell: bash
+        run: |
+          APP_NAME="${{ github.event.inputs.app_name }}"
+          BUNDLE_ID="${{ github.event.inputs.bundle_id }}"
+          HTML_FILE="${{ github.event.inputs.html_file }}"
+
+          echo "======================================"
+          echo "App name : $APP_NAME"
+          echo "Bundle ID: $BUNDLE_ID"
+          echo "HTML     : $HTML_FILE"
+          echo "======================================"
+
+          npm init -y
+
+          npm install \
+            @capacitor/core \
+            @capacitor/cli \
+            @capacitor/ios
+
+          rm -rf www
+          mkdir -p www
+
+          # --------------------------------------------------------
+          # Copy the selected HTML and all related repository files.
+          #
+          # We copy the whole directory containing the HTML so that
+          # relative CSS / JS / image / asset references continue
+          # to work.
+          # --------------------------------------------------------
+
+          HTML_DIR="$(dirname "$HTML_FILE")"
+
+          if [ "$HTML_DIR" = "." ]; then
+            cp -R ./* www/ 2>/dev/null || true
+          else
+            cp -R "$HTML_DIR"/* www/ 2>/dev/null || true
+          fi
+
+          # Make sure the requested HTML exists in www.
+          cp "$HTML_FILE" "www/$(basename "$HTML_FILE")"
+
+          # --------------------------------------------------------
+          # Capacitor config
+          # --------------------------------------------------------
+
+          npx cap init "$APP_NAME" "$BUNDLE_ID" --web-dir=www
+
+          echo
+          echo "===== capacitor.config.json ====="
+          cat capacitor.config.json
+
+          echo
+          echo "===== www ====="
+          find www -maxdepth 4 -type f | sort | head -500
+
+
+      # ============================================================
+      # 5. Tell Capacitor which HTML page to load
+      # ============================================================
+      - name: Configure Capacitor
+        shell: bash
+        run: |
+          HTML_FILE="${{ github.event.inputs.html_file }}"
+          HTML_NAME="$(basename "$HTML_FILE")"
+
+          node <<'NODE'
+          const fs = require("fs");
+
+          const configPath = "capacitor.config.json";
+          const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+
+          const htmlName = process.env.HTML_NAME;
+
+          config.server = config.server || {};
+
+          // Capacitor normally loads index.html.
+          // Create index.html as a small redirect/loader when the
+          // requested file has another name.
+          console.log("HTML entry:", htmlName);
+
+          fs.writeFileSync(
+            "www/index.html",
+            `<!doctype html>
+          <html>
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+            <title>${config.appName || "HTML App"}</title>
+          </head>
+          <body style="margin:0;padding:0">
+            <script>
+              location.replace(${JSON.stringify(htmlName)});
+            </script>
+          </body>
+          </html>
+          `
+          );
+
+          fs.writeFileSync(
+            configPath,
+            JSON.stringify(config, null, 2) + "\n"
+          );
+          NODE
+        env:
+          HTML_NAME: ${{ github.event.inputs.html_file }}
+
+
+      # ============================================================
+      # 6. Add iOS
+      # ============================================================
+      - name: Add iOS platform
+        shell: bash
+        run: |
+          npx cap add ios
+
+          echo
+          echo "===== iOS project ====="
+          find ios -maxdepth 3 -type f | sort | head -300
+
+
+      # ============================================================
+      # 7. Sync Capacitor
+      # ============================================================
+      - name: Capacitor sync
+        shell: bash
+        run: |
+          npx cap sync ios
+
+          echo
+          echo "✅ Capacitor sync completed"
+
+
+      # ============================================================
+      # 8. Install CocoaPods
+      # ============================================================
+      - name: Install CocoaPods
+        shell: bash
         run: |
           cd ios/App
-          pod repo update
-          pod install --verbose
 
-      - name: Build .app (no signing)
+          pod install --repo-update
+
+          echo
+          echo "✅ CocoaPods installed"
+
+
+      # ============================================================
+      # 9. Force iOS deployment target to 14.0
+      # ============================================================
+      - name: Set deployment target
+        shell: bash
         run: |
           cd ios/App
-          npx cap sync ios || true
+
+          echo "Forcing iOS deployment target to 14.0..."
+
+          find . \
+            -type f \
+            \( -name "project.pbxproj" -o -name "*.xcconfig" -o -name "Podfile" \) \
+            -print0 |
+          while IFS= read -r -d '' file; do
+            echo "Patching: $file"
+
+            sed -i '' \
+              's/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]*/IPHONEOS_DEPLOYMENT_TARGET = 14.0/g' \
+              "$file" || true
+          done
+
+          # --------------------------------------------------------
+          # Podfile
+          # --------------------------------------------------------
+
+          if [ -f Podfile ]; then
+            sed -i '' \
+              's/platform :ios, .*/platform :ios, "14.0"/' \
+              Podfile || true
+          fi
+
+          echo
+          echo "===== Podfile ====="
+          cat Podfile || true
+
+
+      # ============================================================
+      # 10. Reinstall Pods after deployment target modification
+      # ============================================================
+      - name: Reinstall Pods
+        shell: bash
+        run: |
+          cd ios/App
+
+          pod install
+
+          echo "✅ Pods ready"
+
+
+      # ============================================================
+      # 11. Verify Xcode project
+      # ============================================================
+      - name: Verify Xcode project
+        shell: bash
+        run: |
+          cd ios/App
+
+          echo "===== Workspace ====="
+          ls -lh App.xcworkspace
+
+          echo
+          echo "===== Schemes ====="
+          xcodebuild \
+            -workspace App.xcworkspace \
+            -list
+
+
+      # ============================================================
+      # 12. Build unsigned .app
+      # ============================================================
+      - name: Build unsigned iOS app
+        shell: bash
+        run: |
+          cd ios/App
+
+          rm -rf build
+
+          mkdir -p build
+
           xcodebuild \
             -workspace App.xcworkspace \
             -scheme App \
             -configuration Release \
             -sdk iphoneos \
-            BUILD_DIR=$PWD/build \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "$PWD/build/DerivedData" \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            clean build | xcpretty
+            DEVELOPMENT_TEAM="" \
+            clean build
 
-      - name: Package unsigned .ipa
+          echo
+          echo "===== Build products ====="
+          find build -maxdepth 6 -type d -name "*.app" -print
+
+
+      # ============================================================
+      # 13. Find and verify .app
+      # ============================================================
+      - name: Verify built app
+        shell: bash
         run: |
           cd ios/App
-          mkdir -p Payload
-          cp -R build/Release-iphoneos/App.app Payload/
-          zip -r MyApp_unsigned.ipa Payload
-          mkdir -p build/ipa
-          mv MyApp_unsigned.ipa build/ipa/
 
-      - name: Upload unsigned .ipa
+          APP_PATH="$(find build -type d -name "App.app" | head -1)"
+
+          if [ -z "$APP_PATH" ]; then
+            echo "❌ App.app was not generated."
+            find build -maxdepth 8 -print
+            exit 1
+          fi
+
+          echo "APP_PATH=$APP_PATH"
+
+          echo
+          echo "===== APP CONTENTS ====="
+          find "$APP_PATH" -maxdepth 3 -print | sort
+
+          echo
+          echo "===== INFO.PLIST ====="
+
+          PLIST="$APP_PATH/Info.plist"
+
+          if [ ! -f "$PLIST" ]; then
+            echo "❌ Info.plist missing!"
+            exit 1
+          fi
+
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundleDisplayName" \
+            "$PLIST" || true
+
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundleName" \
+            "$PLIST" || true
+
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundleIdentifier" \
+            "$PLIST" || true
+
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundleExecutable" \
+            "$PLIST" || true
+
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundlePackageType" \
+            "$PLIST" || true
+
+          echo
+          echo "===== EXECUTABLE ====="
+
+          EXECUTABLE=$(
+            /usr/libexec/PlistBuddy \
+              -c "Print :CFBundleExecutable" \
+              "$PLIST"
+          )
+
+          if [ ! -f "$APP_PATH/$EXECUTABLE" ]; then
+            echo "❌ Executable missing:"
+            echo "$APP_PATH/$EXECUTABLE"
+            exit 1
+          fi
+
+          file "$APP_PATH/$EXECUTABLE"
+
+          echo
+          echo "===== HTML FILES ====="
+
+          find "$APP_PATH" \
+            -type f \
+            \( -name "*.html" -o -name "*.js" -o -name "*.css" \) \
+            | sort | head -300
+
+          echo
+          echo "✅ App structure looks valid."
+
+
+      # ============================================================
+      # 14. Create proper IPA
+      # ============================================================
+      - name: Package IPA
+        shell: bash
+        run: |
+          cd ios/App
+
+          rm -rf ipa
+          mkdir -p ipa/Payload
+
+          APP_PATH="$(find build -type d -name "App.app" | head -1)"
+
+          if [ -z "$APP_PATH" ]; then
+            echo "❌ App.app not found"
+            exit 1
+          fi
+
+          echo "Copying:"
+          echo "$APP_PATH"
+
+          cp -R "$APP_PATH" ipa/Payload/App.app
+
+          echo
+          echo "===== IPA STRUCTURE ====="
+          find ipa -maxdepth 4 -print | sort
+
+          cd ipa
+
+          # IMPORTANT:
+          # IPA must have Payload/ as the root directory.
+          zip -r ../MyHTMLApp_unsigned.ipa Payload
+
+          cd ..
+
+          echo
+          echo "===== IPA TEST ====="
+
+          unzip -t MyHTMLApp_unsigned.ipa
+
+          echo
+          echo "===== IPA CONTENTS ====="
+
+          unzip -l MyHTMLApp_unsigned.ipa | head -100
+
+          mkdir -p build/ipa
+
+          mv MyHTMLApp_unsigned.ipa build/ipa/
+
+
+      # ============================================================
+      # 15. Final IPA validation
+      # ============================================================
+      - name: Validate IPA
+        shell: bash
+        run: |
+          cd ios/App
+
+          IPA="build/ipa/MyHTMLApp_unsigned.ipa"
+
+          if [ ! -f "$IPA" ]; then
+            echo "❌ IPA not found"
+            exit 1
+          fi
+
+          rm -rf /tmp/ipa_validation
+          mkdir -p /tmp/ipa_validation
+
+          unzip -q "$IPA" -d /tmp/ipa_validation
+
+          echo "===== ROOT ====="
+          find /tmp/ipa_validation -maxdepth 2 -print
+
+          APP_COUNT=$(find /tmp/ipa_validation/Payload -maxdepth 1 -type d -name "*.app" | wc -l)
+
+          if [ "$APP_COUNT" -ne 1 ]; then
+            echo "❌ Expected exactly one .app in Payload/"
+            exit 1
+          fi
+
+          APP=$(find /tmp/ipa_validation/Payload -maxdepth 1 -type d -name "*.app" | head -1)
+
+          echo
+          echo "APP:"
+          echo "$APP"
+
+          if [ ! -f "$APP/Info.plist" ]; then
+            echo "❌ Info.plist missing"
+            exit 1
+          fi
+
+          EXECUTABLE=$(
+            /usr/libexec/PlistBuddy \
+              -c "Print :CFBundleExecutable" \
+              "$APP/Info.plist"
+          )
+
+          if [ ! -f "$APP/$EXECUTABLE" ]; then
+            echo "❌ Executable missing:"
+            echo "$EXECUTABLE"
+            exit 1
+          fi
+
+          echo
+          echo "Executable:"
+          echo "$EXECUTABLE"
+
+          echo
+          echo "Bundle ID:"
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundleIdentifier" \
+            "$APP/Info.plist"
+
+          echo
+          echo "Package Type:"
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundlePackageType" \
+            "$APP/Info.plist"
+
+          echo
+          echo "======================================"
+          echo "✅ IPA VALIDATION SUCCESS"
+          echo "======================================"
+
+          ls -lh "$IPA"
+
+
+      # ============================================================
+      # 16. Upload IPA
+      # ============================================================
+      - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
           name: ios-app
-          path: ios/App/build/ipa/MyApp_unsigned.ipa
+          path: ios/App/build/ipa/MyHTMLApp_unsigned.ipa
           if-no-files-found: error
           retention-days: 7
